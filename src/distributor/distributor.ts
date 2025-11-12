@@ -104,6 +104,7 @@ class Distributor {
     }
 
     async calculateRuntimeCosts(): Promise<runtimeCosts> {
+        console.log("starting calculations")
         const inherentValue = this.runtimeEstimator.GetValue();
         const baseTxEstimate = await this.runtimeEstimator.EstimateBaseTx();
         const baseGasPrice = await this.runtimeEstimator.GetGasPrice();
@@ -123,7 +124,22 @@ class Distributor {
             value: subAccountCost,
         });
 
+        console.log("finished calculations")
         return new runtimeCosts(singleDistributionCost, subAccountCost);
+    }
+
+    // Helper for timeout
+    private withTimeout<T>(promise: Promise<T>, ms: number, context: string): Promise<T> {
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                Logger.error(`Timeout after ${ms}ms in ${context}`);
+                reject(new Error(`Timeout after ${ms}ms in ${context}`));
+            }, ms);
+            promise.then(
+                val => { clearTimeout(timer); resolve(val); },
+                err => { clearTimeout(timer); reject(err); }
+            );
+        });
     }
 
     async findAccountsForDistribution(
@@ -139,35 +155,72 @@ class Distributor {
 
         const shortAddresses = new Heap<distributeAccount>();
 
+        Logger.info(`Starting progress bar for ${this.requestedSubAccounts} sub-accounts`);
         balanceBar.start(this.requestedSubAccounts, 0, {
             speed: 'N/A',
         });
 
+        // Prepare all wallets
+        const wallets = [];
         for (let i = 1; i <= this.requestedSubAccounts; i++) {
-            const addrWallet = Wallet.fromMnemonic(
-                this.mnemonic,
-                `m/44'/60'/0'/0/${i}`
-            ).connect(this.provider);
+            wallets.push({
+                index: i,
+                wallet: Wallet.fromMnemonic(
+                    this.mnemonic,
+                    `m/44'/60'/0'/0/${i}`
+                ).connect(this.provider)
+            });
+        }
 
-            const balance = await addrWallet.getBalance();
-            balanceBar.increment();
+        // Helper for timeout
+        function withTimeout<T>(promise: Promise<T>, ms: number, context: string): Promise<T> {
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    Logger.error(`Timeout after ${ms}ms in ${context}`);
+                    reject(new Error(`Timeout after ${ms}ms in ${context}`));
+                }, ms);
+                promise.then(
+                    val => { clearTimeout(timer); resolve(val); },
+                    err => { clearTimeout(timer); reject(err); }
+                );
+            });
+        }
 
+        // Fetch all balances in parallel, incrementing the bar as each completes, with timeout and logging
+        const balancePromises = wallets.map(({ index, wallet }) =>
+            this.withTimeout(wallet.getBalance(), 10000, `getBalance for index ${index}`)
+                .then(balance => {
+                    balanceBar.increment();
+                    Logger.info(`Fetched balance for index ${index}: ${balance.toString()}`);
+                    return { index, wallet, balance };
+                })
+                .catch(err => {
+                    Logger.error(`Failed to fetch balance for index ${index}: ${err instanceof Error ? err.message : String(err)}`);
+                    return { index, wallet, balance: BigNumber.from(0) };
+                })
+        );
+
+        const results = await Promise.all(balancePromises);
+
+        // Check if all balances failed (all are zero)
+        const allFailed = results.every(({ balance }) => balance.eq(0));
+        if (allFailed) {
+            Logger.error('FATAL: All balance requests failed. Exiting.');
+            process.exit(1);
+        }
+
+        for (const { index, wallet, balance } of results) {
             if (balance.lt(singleRunCost)) {
-                // Address doesn't have enough funds, make sure it's
-                // on the list to get topped off
                 shortAddresses.push(
                     new distributeAccount(
                         singleRunCost.sub(balance),
-                        addrWallet.address,
-                        i
+                        wallet.address,
+                        index
                     )
                 );
-
-                continue;
+            } else {
+                this.readyMnemonicIndexes.push(index);
             }
-
-            // Address has enough funds already, mark it as ready
-            this.readyMnemonicIndexes.push(i);
         }
 
         balanceBar.stop();
@@ -230,14 +283,45 @@ class Distributor {
             speed: 'N/A',
         });
 
-        for (const acc of accounts) {
-            await this.ethWallet.sendTransaction({
-                to: acc.address,
-                value: acc.missingFunds,
-            });
+        // Helper for retrying a transaction
+        const sendWithRetry = async (acc: distributeAccount, retries = 3) => {
+            for (let attempt = 1; attempt <= retries; attempt++) {
+                try {
+                    Logger.info(`Funding account ${acc.address} (index ${acc.mnemonicIndex}), attempt ${attempt}`);
+                    await this.withTimeout(
+                        this.ethWallet.sendTransaction({
+                            to: acc.address,
+                            value: acc.missingFunds,
+                        }),
+                        15000,
+                        `sendTransaction for index ${acc.mnemonicIndex}`
+                    );
+                    this.readyMnemonicIndexes.push(acc.mnemonicIndex);
+                    // Logger.info(`Successfully funded account ${acc.address} (index ${acc.mnemonicIndex})`);
+                    return true;
+                } catch (err) {
+                    const errorMsg = (err instanceof Error) ? err.message : String(err);
+                    // Logger.error(`Funding error for account ${acc.address} (index ${acc.mnemonicIndex}), attempt ${attempt}: ${errorMsg}`);
+                    if (attempt < retries) {
+                        // Logger.warn(`Retrying funding for account ${acc.address} (index ${acc.mnemonicIndex}), attempt ${attempt}`);
+                        await new Promise(res => setTimeout(res, 1000 * attempt)); // Exponential backoff
+                    } else {
+                        // Logger.error(`Funding failed for account ${acc.address} after ${retries} attempts: ${errorMsg}`);
+                        return false;
+                    }
+                }
+            }
+        };
 
-            fundBar.increment();
-            this.readyMnemonicIndexes.push(acc.mnemonicIndex);
+        // Send transactions in batches of 1000
+        const BATCH_SIZE = 1000;
+        for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
+            const batch = accounts.slice(i, i + BATCH_SIZE);
+            const txPromises = batch.map(async acc => {
+                await sendWithRetry(acc);
+                fundBar.increment();
+            });
+            await Promise.all(txPromises);
         }
 
         fundBar.stop();
