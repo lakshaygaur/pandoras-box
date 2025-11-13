@@ -3,8 +3,12 @@ node_modules
 
 # Build files
 bin
+run.sh
+stats.sh
 
 # Dev environment metadata
 .idea
 .DS_Store
 *.log
+run_*.json
+mnemonics.txt

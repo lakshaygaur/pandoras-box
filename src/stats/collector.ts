@@ -199,32 +199,60 @@ class StatCollector {
         const batchErrors: string[] = [];
 
         let nextIndx = 0;
-        const responses = await Promise.all<AxiosResponse<any, any>>(
-            batches.map((hashes) => {
+        // Limit concurrency for batch receipt requests
+            const maxConcurrent = 50;
+        const responses: AxiosResponse<any, any>[] = [];
+        for (let i = 0; i < batches.length; i += maxConcurrent) {
+            const batchGroup = batches.slice(i, i + maxConcurrent);
+            Logger.info(`[Receipt] Processing batch group ${i / maxConcurrent + 1}/${Math.ceil(batches.length / maxConcurrent)} (batches ${i} to ${i + batchGroup.length - 1})`);
+            const groupResponses: AxiosResponse<any, any>[] = [];
+            for (const [batchIdx, hashes] of batchGroup.entries()) {
+                // Logger.info(`[Receipt] Starting batch ${i + batchIdx} with ${hashes.length} txs`);
                 let singleRequests = '';
-                for (let i = 0; i < hashes.length; i++) {
+                for (let j = 0; j < hashes.length; j++) {
                     singleRequests += JSON.stringify({
                         jsonrpc: '2.0',
                         method: 'eth_getTransactionReceipt',
-                        params: [hashes[i]],
+                        params: [hashes[j]],
                         id: nextIndx++,
                     });
-
-                    if (i != hashes.length - 1) {
+                    if (j != hashes.length - 1) {
                         singleRequests += ',\n';
                     }
                 }
-
-                return axios({
-                    url: url,
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    data: '[' + singleRequests + ']',
-                });
-            })
-        );
+                // Retry logic for each batch
+                let attempt = 0;
+                let lastError = null;
+                while (attempt < 4) {
+                    // Logger.info(`[Receipt] Batch ${i + batchIdx} attempt ${attempt + 1}/4`);
+                    try {
+                        const resp = await axios({
+                            url: url,
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            data: '[' + singleRequests + ']',
+                            timeout: 30000, // 30s timeout per batch
+                        });
+                        // Logger.info(`[Receipt] Batch ${i + batchIdx} succeeded on attempt ${attempt + 1}`);
+                        groupResponses.push(resp);
+                        break;
+                    } catch (err) {
+                        lastError = err;
+                        attempt++;
+                        Logger.warn(`[Receipt] Batch ${i + batchIdx} failed (attempt ${attempt}/4): ${err instanceof Error ? err.message : String(err)}`);
+                        if (attempt < 4) {
+                            await new Promise(res => setTimeout(res, 2000 * attempt));
+                        }
+                    }
+                }
+                if (attempt === 4 && lastError) {
+                    Logger.error(`[Receipt] Batch ${i + batchIdx} permanently failed after 4 attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+                }
+            }
+            responses.push(...groupResponses);
+        }
 
         for (let batchIndex = 0; batchIndex < responses.length; batchIndex++) {
             const data = responses[batchIndex].data;

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { Wallet } from '@ethersproject/wallet';
+import { JsonRpcProvider } from '@ethersproject/providers';
 import { Distributor, Runtime } from './distributor/distributor';
 import TokenDistributor from './distributor/tokenDistributor';
 import Logger from './logger/logger';
@@ -33,7 +35,7 @@ async function run() {
         )
         .requiredOption(
             '-m, --mnemonic <mnemonic>',
-            'The mnemonic used to generate spam accounts'
+            'The mnemonic(s) used to generate spam accounts. Can be comma-separated for parallel funding'
         )
         .option(
             '-s, -sub-accounts <sub-accounts>',
@@ -66,30 +68,34 @@ async function run() {
     const url = options.jsonRpc;
     const transactionCount = options.transactions;
     const mode = options.mode;
-    const mnemonic = options.mnemonic;
+    const mnemonicInput = options.mnemonic;
     const subAccountsCount = options.SubAccounts;
     const batchSize = options.batch;
     const output = options.output;
 
+    // Parse comma-separated mnemonics
+    const mnemonics = mnemonicInput.split(',').map((m: string) => m.trim());
+    const mainMnemonic = mnemonics[0];
+
+    // Create funding wallets from all provided mnemonics
+    const fundingWallets = mnemonics.map((mnemonic: string) =>
+        Wallet.fromMnemonic(mnemonic, `m/44'/60'/0'/0/0`).connect(
+            new JsonRpcProvider(url)
+        )
+    );
+
     let runtime: Runtime;
     switch (mode) {
         case RuntimeType.EOA:
-            runtime = new EOARuntime(mnemonic, url);
-
+            runtime = new EOARuntime(mainMnemonic, url);
             break;
         case RuntimeType.ERC20:
-            runtime = new ERC20Runtime(mnemonic, url);
-
-            // Initialize the runtime
+            runtime = new ERC20Runtime(mainMnemonic, url);
             await (runtime as InitializedRuntime).Initialize();
-
             break;
         case RuntimeType.ERC721:
-            runtime = new ERC721Runtime(mnemonic, url);
-
-            // Initialize the runtime
+            runtime = new ERC721Runtime(mainMnemonic, url);
             await (runtime as InitializedRuntime).Initialize();
-
             break;
         default:
             throw RuntimeErrors.errUnknownRuntime;
@@ -97,25 +103,23 @@ async function run() {
 
     // Distribute the native currency funds
     const distributor = new Distributor(
-        mnemonic,
+        mainMnemonic,
         subAccountsCount,
         transactionCount,
         runtime,
         url
     );
 
-    const accountIndexes: number[] = await distributor.distribute();
+    const accountIndexes: number[] = await distributor.distribute(fundingWallets);
 
     // Distribute the token funds, if any
     if (mode === RuntimeType.ERC20) {
         const tokenDistributor = new TokenDistributor(
-            mnemonic,
+            mainMnemonic,
             accountIndexes,
             transactionCount,
             runtime as TokenRuntime
         );
-
-        // Start the distribution
         await tokenDistributor.distributeTokens();
     }
 
@@ -126,15 +130,21 @@ async function run() {
             accountIndexes,
             transactionCount,
             batchSize,
-            mnemonic,
+            mainMnemonic,
             url
         )
     );
 
+    // Dump txHashes to JSON file for later stats calculation
+    const fs = await import('fs');
+    const txHashesFilename = output ? output.replace(/\.json$/, '') + '_tx_hashes.json' : 'tx_hashes.json';
+    fs.writeFileSync(txHashesFilename, JSON.stringify(txHashes, null, 2));
+    Logger.success(`Dumped txHashes to ${txHashesFilename}`);
+
     // Collect the data
     const collectorData = await new StatCollector().generateStats(
         txHashes,
-        mnemonic,
+        mainMnemonic,
         url,
         batchSize
     );
@@ -143,6 +153,9 @@ async function run() {
     if (output) {
         Outputter.outputData(collectorData, output);
     }
+
+    // Parse options and subcommands at the end
+    program.parse(process.argv);
 }
 
 run()

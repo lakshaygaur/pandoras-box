@@ -60,12 +60,10 @@ class Batcher {
         const txHashes: string[] = [];
         const batchErrors: string[] = [];
 
-        let nextIndx = 0;
-        // Retry logic for each batch
-        const sendBatchWithRetry = async (item: string[], retries = 3) => {
-            let lastError = null;
-            for (let attempt = 1; attempt <= retries; attempt++) {
-                try {
+        try {
+            let nextIndx = 0;
+            const responses = await Promise.all(
+                batches.map((item) => {
                     let singleRequests = '';
                     for (let i = 0; i < item.length; i++) {
                         singleRequests += JSON.stringify({
@@ -74,12 +72,15 @@ class Batcher {
                             params: [item[i]],
                             id: nextIndx++,
                         });
+
                         if (i != item.length - 1) {
                             singleRequests += ',\n';
                         }
                     }
+
                     batchBar.increment();
-                    const response = await axios({
+
+                    return axios({
                         url: url,
                         method: 'POST',
                         headers: {
@@ -87,38 +88,21 @@ class Batcher {
                         },
                         data: '[' + singleRequests + ']',
                     });
-                    return response;
-                } catch (err) {
-                    lastError = err;
-                    if (attempt < retries) {
-                        Logger.warn(`Batch send retry ${attempt} for batch: ${err instanceof Error ? err.message : String(err)}`);
-                        await new Promise(res => setTimeout(res, 1000 * attempt));
-                    } else {
-                        Logger.error(`Batch send failed after ${retries} attempts: ${err instanceof Error ? err.message : String(err)}`);
-                        throw err;
-                    }
-                }
-            }
-        };
-
-        try {
-            const responses = await Promise.all(
-                batches.map(item => sendBatchWithRetry(item))
+                })
             );
 
             for (let i = 0; i < responses.length; i++) {
-                const content = responses[i]?.data;
-                if (!content) {
-                    Logger.warn('No response data for batch ' + i);
-                    continue;
-                }
+                const content = responses[i].data;
+
                 for (const cnt of content) {
                     // eslint-disable-next-line no-prototype-builtins
                     if (cnt.hasOwnProperty('error')) {
                         // Error occurred during batch sends
                         batchErrors.push(cnt.error.message);
+
                         continue;
                     }
+
                     txHashes.push(cnt.result);
                 }
             }
@@ -130,6 +114,7 @@ class Batcher {
 
         if (batchErrors.length > 0) {
             Logger.warn('Errors encountered during batch sending:');
+
             for (const err of batchErrors) {
                 Logger.error(err);
             }

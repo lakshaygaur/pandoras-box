@@ -75,16 +75,13 @@ class Signer {
 
         // Fetch all nonces in parallel
         const noncePromises = walletObjs.map(({ accIndex, wallet }) =>
-            wallet.getTransactionCount().then(accountNonce => ({ accIndex, wallet, accountNonce }))
+            wallet.getTransactionCount().then(accountNonce => {
+                nonceBar.increment();
+                return new senderAccount(accIndex, accountNonce, wallet);
+            })
         );
 
-        const results = await Promise.all(noncePromises);
-
-        const accounts: senderAccount[] = [];
-        for (const { accIndex, wallet, accountNonce } of results) {
-            accounts.push(new senderAccount(accIndex, accountNonce, wallet));
-            nonceBar.increment();
-        }
+        const accounts: senderAccount[] = await Promise.all(noncePromises);
 
         nonceBar.stop();
 
