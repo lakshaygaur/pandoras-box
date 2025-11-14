@@ -17,6 +17,7 @@
         "eslint-plugin-prettier": "^5.1.3",
         "globals": "^16.5.0",
         "prettier": "3.6.2",
+        "ts-node": "^10.9.2",
         "typescript": "^5.0.2",
         "typescript-eslint": "^8.46.4"
     },
@@ -27,6 +28,7 @@
         "build": "yarn tsc && yarn chmod",
         "chmod": "chmod u+x ./bin/index.js",
         "prepare": "yarn build",
+        "fund": "ts-node src/fund.ts",
         "prepublishOnly": "yarn lint && yarn prettier"
     },
     "bin": {

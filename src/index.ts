@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+// ...existing imports...
 import { Wallet } from '@ethersproject/wallet';
 import { JsonRpcProvider } from '@ethersproject/providers';
 import { Distributor, Runtime } from './distributor/distributor';
@@ -19,6 +20,21 @@ import {
 import { StatCollector } from './stats/collector';
 
 async function run() {
+    // Create StatCollector instance early so signal handlers can access it
+    const statCollector = new StatCollector();
+
+    // Add SIGTERM/SIGINT event handlers to dump cache before any awaits
+    process.on('SIGTERM', () => {
+        statCollector.dumpCache();
+        Logger.warn('SIGTERM received, cache dumped. Exiting.');
+        process.exit(0);
+    });
+    process.on('SIGINT', () => {
+        statCollector.dumpCache();
+        Logger.warn('SIGINT received, cache dumped. Exiting.');
+        process.exit(0);
+    });
+
     const program = new Command();
 
     program
@@ -38,7 +54,7 @@ async function run() {
             'The mnemonic(s) used to generate spam accounts. Can be comma-separated for parallel funding'
         )
         .option(
-            '-s, -sub-accounts <sub-accounts>',
+            '-s, --sub-accounts <sub-accounts>',
             'The number of sub-accounts that will send out transactions',
             '10'
         )
@@ -61,15 +77,45 @@ async function run() {
             'The batch size of JSON-RPC transactions',
             '20'
         )
+        .option(
+            '--stats-file <filename>',
+            'If set, only run stats calculation from the given txHashes JSON file and skip all prior actions.'
+        )
         .parse();
 
     const options = program.opts();
 
+    // If --stats-file is set, run stats calculation only
+    if (options.statsFile) {
+        const fs = await import('fs');
+        const txHashes = JSON.parse(fs.readFileSync(options.statsFile, 'utf8'));
+        const batchSize = options.batch;
+        const url = options.jsonRpc;
+        const mnemonicInput = options.mnemonic;
+        // Parse comma-separated mnemonics
+        const mnemonics = mnemonicInput.split(',').map((m: string) => m.trim());
+        const mainMnemonic = mnemonics[0];
+
+        const output = options.output;
+        Logger.info(`Loaded ${txHashes.length} txHashes from ${options.statsFile}`);
+        const collectorData = await statCollector.generateStats(
+            txHashes,
+            mainMnemonic,
+            url,
+            batchSize
+        );
+        if (output) {
+            Outputter.outputData(collectorData, output);
+        }
+        return;
+    }
+
+    // ...existing code for main test run...
     const url = options.jsonRpc;
     const transactionCount = options.transactions;
     const mode = options.mode;
     const mnemonicInput = options.mnemonic;
-    const subAccountsCount = options.SubAccounts;
+    const subAccountsCount = options.subAccounts;
     const batchSize = options.batch;
     const output = options.output;
 
@@ -141,21 +187,21 @@ async function run() {
     fs.writeFileSync(txHashesFilename, JSON.stringify(txHashes, null, 2));
     Logger.success(`Dumped txHashes to ${txHashesFilename}`);
 
-    // Collect the data
-    const collectorData = await new StatCollector().generateStats(
-        txHashes,
-        mainMnemonic,
-        url,
-        batchSize
-    );
+    // // Collect the data
+    // const collectorData = await statCollector.generateStats(
+    //     txHashes,
+    //     mainMnemonic,
+    //     url,
+    //     batchSize
+    // );
 
-    // Output the data if needed
-    if (output) {
-        Outputter.outputData(collectorData, output);
-    }
+    // // Output the data if needed
+    // if (output) {
+    //     Outputter.outputData(collectorData, output);
+    // }
 
-    // Parse options and subcommands at the end
-    program.parse(process.argv);
+    // // Parse options and subcommands at the end
+    // program.parse(process.argv);
 }
 
 run()

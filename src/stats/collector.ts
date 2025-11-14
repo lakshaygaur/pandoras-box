@@ -4,6 +4,8 @@ import axios, { AxiosResponse } from 'axios';
 import { SingleBar } from 'cli-progress';
 import Table from 'cli-table3';
 import Logger from '../logger/logger';
+import fs from 'fs';
+import path from 'path';
 import Batcher from '../runtime/batcher';
 
 class txStats {
@@ -72,10 +74,27 @@ class txBatchResult {
 }
 
 class StatCollector {
+    // Store last used cacheFile and cachedReceipts for event-based dumping
+    private _lastCacheFile: string | undefined;
+    private _lastCachedReceipts: Record<string, any> | undefined;
+
+    // Call this to dump the latest receipts to disk (for SIGTERM/SIGINT)
+    dumpCache(): void {
+        if (this._lastCacheFile && this._lastCachedReceipts) {
+            try {
+                // console.log("this._lastCachedReceipts ====>>>>> ", this._lastCachedReceipts)
+                fs.writeFileSync(path.resolve(this._lastCacheFile), JSON.stringify(this._lastCachedReceipts, null, 2), 'utf8');
+                Logger.info(`Cache dumped to ${this._lastCacheFile} on signal.`);
+            } catch (e) {
+                Logger.warn(`Failed to dump cache file ${this._lastCacheFile}: ${e}`);
+            }
+        }
+    }
     async gatherTransactionReceipts(
         txHashes: string[],
         batchSize: number,
-        provider: Provider
+        provider: Provider,
+        cacheFile: string = 'temp.json'
     ): Promise<txStats[]> {
         Logger.info('Gathering transaction receipts...');
 
@@ -89,56 +108,67 @@ class StatCollector {
             speed: 'N/A',
         });
 
-        const fetchErrors: string[] = [];
+        // Load cached receipts if available
+    let cachedReceipts: Record<string, any> = {};
+    const cachePath = path.resolve(cacheFile);
+    // Track for event-based dumping
+    this._lastCacheFile = cacheFile;
+    this._lastCachedReceipts = cachedReceipts;
+        if (fs.existsSync(cachePath)) {
+            try {
+                cachedReceipts = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+            } catch (e) {
+                Logger.warn(`Could not parse ${cacheFile}, starting with empty cache.`);
+            }
+            // Update tracked receipts for event-based dumping
+            this._lastCachedReceipts = cachedReceipts;
+        }
 
+        const fetchErrors: string[] = [];
         let receiptBarProgress = 0;
         let retryCounter = Math.ceil(txHashes.length * 0.025);
-        let remainingTransactions: string[] = txHashes;
+        let remainingTransactions: string[] = [];
         let succeededTransactions: txStats[] = [];
+
+        // Partition txHashes into cached and uncached
+        for (const txHash of txHashes) {
+            if (cachedReceipts[txHash]) {
+                const receipt = cachedReceipts[txHash];
+                succeededTransactions.push(new txStats(txHash, receipt.blockNumber));
+                receiptBar.increment(1);
+            } else {
+                remainingTransactions.push(txHash);
+            }
+        }
 
         const providerURL = (provider as JsonRpcProvider).connection.url;
 
-        // Fetch transaction receipts in batches,
-        // until the batch retry counter is reached (to avoid spamming)
+        // Fetch transaction receipts in batches for uncached txs
         while (remainingTransactions.length > 0) {
-            // Get the receipts for this batch
             const result = await this.fetchTransactionReceipts(
                 remainingTransactions,
                 batchSize,
-                providerURL
+                providerURL,
+                cachedReceipts,
+                cacheFile
             );
-
-            // Save any fetch errors
             for (const fetchErr of result.errors) {
                 fetchErrors.push(fetchErr);
             }
-
-            // Update the remaining transactions whose
-            // receipts need to be fetched
+            // Update the remaining transactions whose receipts need to be fetched
             remainingTransactions = result.remaining;
-
-            // Save the succeeded transactions
-            succeededTransactions = succeededTransactions.concat(
-                result.succeeded
-            );
-
+            // Save the succeeded transactions and cache them
+            for (const stat of result.succeeded) {
+                succeededTransactions.push(stat);
+                cachedReceipts[stat.txHash] = { blockNumber: stat.block };
+            }
             // Update the user loading bar
-            receiptBar.increment(
-                succeededTransactions.length - receiptBarProgress
-            );
-            receiptBarProgress = succeededTransactions.length;
-
-            // Decrease the retry counter
+            receiptBar.increment(result.succeeded.length);
+            receiptBarProgress += result.succeeded.length;
             retryCounter--;
-
             if (remainingTransactions.length == 0 || retryCounter == 0) {
-                // If there are no more remaining transaction receipts to wait on,
-                // or the batch retries have been depleted, stop the batching process
                 break;
             }
-
-            // Wait for a block to be mined on the network before asking
-            // for the receipts again
             await new Promise((resolve) => {
                 provider.once('block', () => {
                     resolve(null);
@@ -146,48 +176,58 @@ class StatCollector {
             });
         }
 
-        // Wait for the transaction receipts individually
-        // if they were not retrieved in the batching process.
-        // This process is slower, but it guarantees transaction receipts
-        // will eventually get retrieved, regardless of the number of blocks
+        // Wait for the transaction receipts individually if not retrieved in batch
         for (const txHash of remainingTransactions) {
-            const txReceipt = await provider.waitForTransaction(
-                txHash,
-                1,
-                30 * 1000 // 30s per transaction
-            );
-
-            receiptBar.increment(1);
-
-            if (txReceipt.status != undefined && txReceipt.status == 0) {
-                throw new Error(
-                    `transaction ${txReceipt.transactionHash} failed on execution`
+            let txReceipt;
+            try {
+                txReceipt = await provider.waitForTransaction(
+                    txHash,
+                    1,
+                    30 * 1000 // 30s per transaction
                 );
+                receiptBar.increment(1);
+                if (txReceipt.status != undefined && txReceipt.status == 0) {
+                    throw new Error(
+                        `transaction ${txReceipt.transactionHash} failed on execution`
+                    );
+                }
+                succeededTransactions.push(new txStats(txHash, txReceipt.blockNumber));
+                cachedReceipts[txHash] = { blockNumber: txReceipt.blockNumber };
+            } catch (e) {
+                Logger.error(`Error waiting for transaction receipt for ${txHash}: ${e}`);
             }
+            // Always write cache after each receipt attempt
+            try {
+                fs.writeFileSync(cachePath, JSON.stringify(cachedReceipts, null, 2), 'utf8');
+            } catch (e) {
+                Logger.warn(`Failed to write cache file ${cacheFile}: ${e}`);
+            }
+        }
 
-            succeededTransactions.push(
-                new txStats(txHash, txReceipt.blockNumber)
-            );
+        // Write updated cache
+        try {
+            fs.writeFileSync(cachePath, JSON.stringify(cachedReceipts, null, 2), 'utf8');
+        } catch (e) {
+            Logger.warn(`Failed to write cache file ${cacheFile}: ${e}`);
         }
 
         receiptBar.stop();
         if (fetchErrors.length > 0) {
             Logger.warn('Errors encountered during batch sending:');
-
             for (const err of fetchErrors) {
                 Logger.error(err);
             }
         }
-
         Logger.success('Gathered transaction receipts');
-
         return succeededTransactions;
     }
 
     async fetchTransactionReceipts(
         txHashes: string[],
         batchSize: number,
-        url: string
+        url: string,
+        cachedReceipts?: Record<string, any>,
+        cacheFile?: string
     ): Promise<txBatchResult> {
         // Create the batches for transaction receipts
         const batches: string[][] = Batcher.generateBatches<string>(
@@ -199,15 +239,15 @@ class StatCollector {
         const batchErrors: string[] = [];
 
         let nextIndx = 0;
-        // Limit concurrency for batch receipt requests
-            const maxConcurrent = 50;
-        const responses: AxiosResponse<any, any>[] = [];
-        for (let i = 0; i < batches.length; i += maxConcurrent) {
-            const batchGroup = batches.slice(i, i + maxConcurrent);
-            Logger.info(`[Receipt] Processing batch group ${i / maxConcurrent + 1}/${Math.ceil(batches.length / maxConcurrent)} (batches ${i} to ${i + batchGroup.length - 1})`);
-            const groupResponses: AxiosResponse<any, any>[] = [];
-            for (const [batchIdx, hashes] of batchGroup.entries()) {
-                // Logger.info(`[Receipt] Starting batch ${i + batchIdx} with ${hashes.length} txs`);
+        const MAX_CONCURRENT = 200;
+        const AXIOS_TIMEOUT_MS = 30000;
+    // Track for event-based dumping
+    this._lastCacheFile = cacheFile;
+    this._lastCachedReceipts = cachedReceipts;
+    for (let i = 0; i < batches.length; i += MAX_CONCURRENT) {
+            const batchGroup = batches.slice(i, i + MAX_CONCURRENT);
+            // Prepare requests for this group
+            const requests = batchGroup.map((hashes) => {
                 let singleRequests = '';
                 for (let j = 0; j < hashes.length; j++) {
                     singleRequests += JSON.stringify({
@@ -220,80 +260,97 @@ class StatCollector {
                         singleRequests += ',\n';
                     }
                 }
-                // Retry logic for each batch
-                let attempt = 0;
-                let lastError = null;
-                while (attempt < 4) {
-                    // Logger.info(`[Receipt] Batch ${i + batchIdx} attempt ${attempt + 1}/4`);
-                    try {
-                        const resp = await axios({
-                            url: url,
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
-                            data: '[' + singleRequests + ']',
-                            timeout: 30000, // 30s timeout per batch
-                        });
-                        // Logger.info(`[Receipt] Batch ${i + batchIdx} succeeded on attempt ${attempt + 1}`);
-                        groupResponses.push(resp);
-                        break;
-                    } catch (err) {
-                        lastError = err;
-                        attempt++;
-                        Logger.warn(`[Receipt] Batch ${i + batchIdx} failed (attempt ${attempt}/4): ${err instanceof Error ? err.message : String(err)}`);
-                        if (attempt < 4) {
-                            await new Promise(res => setTimeout(res, 2000 * attempt));
+                return axios({
+                    url: url,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    data: '[' + singleRequests + ']',
+                    timeout: AXIOS_TIMEOUT_MS,
+                });
+            });
+            // Await all requests in this group, with error handling and timeout
+            let responses: AxiosResponse<any>[] = [];
+            for (let reqIdx = 0; reqIdx < requests.length; reqIdx++) {
+                try {
+                    const resp = await requests[reqIdx];
+                    Logger.info(`Batch request succeeded [batchGroupIdx=${i}, requestIdx=${reqIdx}]`);
+                    for (let k = 0; k < resp.data.length; k++) {
+                        const item = resp.data[k];
+                        const txHash = batchGroup[reqIdx][k];
+                        if (item?.result) {
+                            Logger.info(`  txHash=${txHash}, blockHash=${item.result.blockHash}`);
+                        } else {
+                            Logger.info(`  txHash=${txHash}, receipt not found (result=null)`);
                         }
                     }
-                }
-                if (attempt === 4 && lastError) {
-                    Logger.error(`[Receipt] Batch ${i + batchIdx} permanently failed after 4 attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+                    responses.push(resp);
+                } catch (err: any) {
+                    // Timeout or other error handling
+                    if (err?.code === 'ECONNABORTED' || err?.message?.includes('timeout')) {
+                        Logger.error(`Batch request timed out [batchGroupIdx=${i}, requestIdx=${reqIdx}]`);
+                    } else {
+                        Logger.error(`Batch request failed [batchGroupIdx=${i}, requestIdx=${reqIdx}]`);
+                    }
+                    Logger.error(`TxHashes: ${JSON.stringify(batchGroup[reqIdx])}`);
+                    Logger.error(`Error: ${err?.message || err}`);
+                    if (err?.code) Logger.error(`Error code: ${err.code}`);
+                    if (err?.stack) Logger.error(`Stack: ${err.stack}`);
+                    if (err?.response?.status) Logger.error(`HTTP status: ${err.response.status}`);
+                    batchErrors.push(`BatchGroupIdx=${i}, RequestIdx=${reqIdx}: ${err?.message || err}`);
+                    // Mark all txHashes in this failed batch as remaining
+                    for (const txHash of batchGroup[reqIdx]) {
+                        remaining.push(txHash);
+                    }
                 }
             }
-            responses.push(...groupResponses);
-        }
 
-        for (let batchIndex = 0; batchIndex < responses.length; batchIndex++) {
-            const data = responses[batchIndex].data;
-
-            for (
-                let txHashIndex = 0;
-                txHashIndex < data.length;
-                txHashIndex++
-            ) {
-                const batchItem = data[txHashIndex];
-
-                if (!batchItem.result) {
-                    remaining.push(batches[batchIndex][txHashIndex]);
-
-                    continue;
-                }
-
-                // eslint-disable-next-line no-prototype-builtins
-                if (batchItem.hasOwnProperty('error')) {
-                    // Error occurred during batch sends
-                    batchErrors.push(batchItem.error.message);
-
-                    continue;
-                }
-
-                if (batchItem.result.status == '0x0') {
-                    // Transaction failed
-                    throw new Error(
-                        `transaction ${batchItem.result.transactionHash} failed on execution`
+            let newReceipts: Record<string, any> = {};
+            for (let batchIndex = 0; batchIndex < responses.length; batchIndex++) {
+                const data = responses[batchIndex].data;
+                for (let txHashIndex = 0; txHashIndex < data.length; txHashIndex++) {
+                    const batchItem = data[txHashIndex];
+                    const txHash = batchGroup[batchIndex][txHashIndex];
+                    if (batchItem.result) {
+                        if (cachedReceipts) {
+                            cachedReceipts[txHash] = { blockNumber: batchItem.result.blockNumber };
+                            newReceipts[txHash] = { blockNumber: batchItem.result.blockNumber };
+                        }
+                    }
+                    if (!batchItem.result) {
+                        remaining.push(batchGroup[batchIndex][txHashIndex]);
+                        continue;
+                    }
+                    // eslint-disable-next-line no-prototype-builtins
+                    if (batchItem.hasOwnProperty('error')) {
+                        batchErrors.push(batchItem.error.message);
+                        continue;
+                    }
+                    if (batchItem.result.status == '0x0') {
+                        throw new Error(
+                            `transaction ${batchItem.result.transactionHash} failed on execution`
+                        );
+                    }
+                    succeeded.push(
+                        new txStats(
+                            batchItem.result.transactionHash,
+                            batchItem.result.blockNumber
+                        )
                     );
                 }
-
-                succeeded.push(
-                    new txStats(
-                        batchItem.result.transactionHash,
-                        batchItem.result.blockNumber
-                    )
-                );
+            }
+            // Write updated cache after each batch group, regardless of success
+            if (cacheFile && cachedReceipts) {
+                try {
+                    fs.writeFileSync(path.resolve(cacheFile), JSON.stringify(cachedReceipts, null, 2), 'utf8');
+                } catch (e) {
+                    Logger.warn(`Failed to write cache file ${cacheFile}: ${e}`);
+                }
+                // Update tracked receipts for event-based dumping
+                this._lastCachedReceipts = cachedReceipts;
             }
         }
-
         return new txBatchResult(succeeded, remaining, batchErrors);
     }
 
