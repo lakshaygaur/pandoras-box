@@ -505,9 +505,9 @@
   integrity sha512-vxhUy4J8lyeyinH7Azl1pdd43GJhZH/tP2weN8TntQblOY+A0XbT8DJk1/oCPuOOyg/Ja757rG0CgHcWC8OfMA==
 
 "@types/cli-progress@^3.11.0":
-  version "3.11.5"
-  resolved "https://registry.npmjs.org/@types/cli-progress/-/cli-progress-3.11.5.tgz"
-  integrity sha512-D4PbNRbviKyppS5ivBGyFO29POlySLmA2HyUFE4p5QGazAMM3CwkKWcvTl8gvElSuxRh6FPKL8XmidX873ou4g==
+  version "3.11.6"
+  resolved "https://registry.yarnpkg.com/@types/cli-progress/-/cli-progress-3.11.6.tgz#94b334ebe4190f710e51c1bf9b4fedb681fa9e45"
+  integrity sha512-cE3+jb9WRlu+uOSAugewNpITJDt1VF8dHOopPO4IABFc3SXYL5WE/+PTz/FCdZRRfIujiWW3n3aMbv1eIGVRWA==
   dependencies:
     "@types/node" "*"
 
@@ -522,9 +522,9 @@
   integrity sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==
 
 "@types/heap@^0.2.31":
-  version "0.2.34"
-  resolved "https://registry.npmjs.org/@types/heap/-/heap-0.2.34.tgz"
-  integrity sha512-x9gp0NZnQeFrgrb6O3Tq5KtvsuEhWbc2vlHfs4cDOKcHsanzI39lIGcPdND/MRyaKUbxNgKXfKGCQGnjjOWweQ==
+  version "0.2.35"
+  resolved "https://registry.yarnpkg.com/@types/heap/-/heap-0.2.35.tgz#a806cf004b68f6c468cf077a54891af991c9128b"
+  integrity sha512-PAhEqlvEsl93oDSLcKy+vqPEwvBvTgCCAyYUHQc2ie3h+xKsbvJRzX2WHVsriLGF5PCgkWswS0z4gmaPSBz8hg==
 
 "@types/json-schema@^7.0.15":
   version "7.0.15"
