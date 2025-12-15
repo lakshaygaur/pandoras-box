@@ -29,6 +29,7 @@
         "chmod": "chmod u+x ./bin/index.js",
         "prepare": "yarn build",
         "fund": "ts-node src/fund.ts",
+        "stats": "ts-node src/statsCollector.ts",
         "prepublishOnly": "yarn lint && yarn prettier"
     },
     "bin": {

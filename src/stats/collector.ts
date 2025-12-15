@@ -239,7 +239,7 @@ class StatCollector {
         const batchErrors: string[] = [];
 
         let nextIndx = 0;
-        const MAX_CONCURRENT = 200;
+        const MAX_CONCURRENT = 100;
         const AXIOS_TIMEOUT_MS = 30000;
     // Track for event-based dumping
     this._lastCacheFile = cacheFile;

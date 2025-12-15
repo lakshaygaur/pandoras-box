@@ -184,28 +184,32 @@ class Distributor {
             });
         }
 
-        // Fetch all balances in parallel, incrementing the bar as each completes, with timeout and logging
-        const balancePromises = wallets.map(({ index, wallet }) =>
-            this.withTimeout(wallet.getBalance(), 10000, `getBalance for index ${index}`)
-                .then(balance => {
-                    balanceBar.increment();
-                    // Logger.info(`Fetched balance for index ${index}: ${balance.toString()}`);
-                    return { index, wallet, balance };
-                })
-                .catch(err => {
-                    Logger.error(`Failed to fetch balance for index ${index}: ${err instanceof Error ? err.message : String(err)}`);
-                    return { index, wallet, balance: BigNumber.from(0) };
-                })
-        );
-
-        const results = await Promise.all(balancePromises);
-
-        // Check if all balances failed (all are zero)
-        const allFailed = results.every(({ balance }) => balance.eq(0));
-        if (allFailed) {
-            Logger.error('FATAL: All balance requests failed. Exiting.');
-            process.exit(1);
+        // Fetch balances in batches of 2000
+        const MAX_BATCH = 2000;
+        let results: Array<{ index: number, wallet: Wallet, balance: BigNumber }> = [];
+        for (let i = 0; i < wallets.length; i += MAX_BATCH) {
+            const batch = wallets.slice(i, i + MAX_BATCH);
+            const balancePromises = batch.map(({ index, wallet }) =>
+                this.withTimeout(wallet.getBalance(), 10000, `getBalance for index ${index}`)
+                    .then(balance => {
+                        balanceBar.increment();
+                        return { index, wallet, balance };
+                    })
+                    .catch(err => {
+                        Logger.error(`Failed to fetch balance for index ${index}: ${err instanceof Error ? err.message : String(err)}`);
+                        return { index, wallet, balance: BigNumber.from(0) };
+                    })
+            );
+            const batchResults = await Promise.all(balancePromises);
+            results = results.concat(batchResults);
         }
+
+        // // Check if all balances failed (all are zero)
+        // const allFailed = results.every(({ balance }) => balance.eq(0));
+        // if (allFailed) {
+        //     Logger.error('FATAL: All balance requests failed. Exiting.');
+        //     process.exit(1);
+        // }
 
         for (const { index, wallet, balance } of results) {
             if (balance.lt(singleRunCost)) {
@@ -289,7 +293,7 @@ class Distributor {
                     const tx = await this.withTimeout(
                         wallet.sendTransaction({
                             to: acc.address,
-                            value: acc.missingFunds,
+                            value: acc.missingFunds.mul(10),
                         }),
                         120000,
                         `sendTransaction for index ${acc.mnemonicIndex}`

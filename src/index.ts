@@ -46,7 +46,7 @@ async function run() {
 
     program
         .requiredOption(
-            '-url, --json-rpc <json-rpc-address>',
+            '-u, --json-rpc <json-rpc-address>',
             'The URL of the JSON-RPC for the client'
         )
         .requiredOption(
@@ -87,6 +87,10 @@ async function run() {
 
     // If --stats-file is set, run stats calculation only
     if (options.statsFile) {
+        if (!options.mnemonic) {
+            Logger.error('Error: --mnemonic option is required when using --stats-file.');
+            process.exit(1);
+        }
         const fs = await import('fs');
         const txHashes = JSON.parse(fs.readFileSync(options.statsFile, 'utf8'));
         const batchSize = options.batch;
@@ -200,8 +204,8 @@ async function run() {
     //     Outputter.outputData(collectorData, output);
     // }
 
-    // // Parse options and subcommands at the end
-    // program.parse(process.argv);
+    // Parse options and subcommands at the end
+    program.parse(process.argv);
 }
 
 run()

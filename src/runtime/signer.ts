@@ -73,15 +73,41 @@ class Signer {
             });
         }
 
-        // Fetch all nonces in parallel
-        const noncePromises = walletObjs.map(({ accIndex, wallet }) =>
-            wallet.getTransactionCount().then(accountNonce => {
-                nonceBar.increment();
-                return new senderAccount(accIndex, accountNonce, wallet);
-            })
-        );
+        // Batch size and retry config
+        const MAX_BATCH = 4000;
+        const MAX_RETRIES = 3;
+        let accounts: senderAccount[] = [];
 
-        const accounts: senderAccount[] = await Promise.all(noncePromises);
+        for (let i = 0; i < walletObjs.length; i += MAX_BATCH) {
+            const batch = walletObjs.slice(i, i + MAX_BATCH);
+            let batchSuccess = false;
+            let retries = 0;
+            let batchResults: senderAccount[] = [];
+            while (!batchSuccess && retries < MAX_RETRIES) {
+                try {
+                    const noncePromises = batch.map(({ accIndex, wallet }) =>
+                        wallet.getTransactionCount().then(accountNonce => {
+                            nonceBar.increment();
+                            return new senderAccount(accIndex, accountNonce, wallet);
+                        })
+                    );
+                    batchResults = await Promise.all(noncePromises);
+                    batchSuccess = true;
+                } catch (err) {
+                    retries++;
+                    Logger.warn(`Batch getTransactionCount failed (batch ${i / MAX_BATCH + 1}), retry ${retries}/${MAX_RETRIES}: ${err instanceof Error ? err.message : String(err)}`);
+                    // Wait before retrying
+                    await new Promise(res => setTimeout(res, 2000 * retries));
+                }
+            }
+            if (!batchSuccess) {
+                Logger.error(`Failed to fetch nonces for batch ${i / MAX_BATCH + 1} after ${MAX_RETRIES} retries.`);
+                // Optionally: throw or skip this batch
+                // throw new Error('Failed to fetch nonces for batch');
+            } else {
+                accounts = accounts.concat(batchResults);
+            }
+        }
 
         nonceBar.stop();
 
